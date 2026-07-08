@@ -19,19 +19,12 @@
 #include "CLUENtuplizer.h"
 
 #include "DD4hep/Detector.h"
-#include "GaudiKernel/Service.h"
 #include <exception>
 
 using namespace dd4hep;
 using namespace DDSegmentation;
 
 DECLARE_COMPONENT(CLUENtuplizer)
-
-struct DetectorSegmentationsLoader final : Service {
-  using Service::Service;
-};
-
-DECLARE_COMPONENT(DetectorSegmentationsLoader)
 
 StatusCode CLUENtuplizer::initialize() {
   const std::string ClusterCollectionName = inputLocations("InputClusters")[0];
