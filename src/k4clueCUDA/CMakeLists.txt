@@ -45,7 +45,7 @@ if(CMAKE_CUDA_COMPILER)
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
   )
 
-  target_link_libraries(ClueGaudiAlgorithmWrapperCUDA PUBLIC clue::CLUEstering)
+  target_link_libraries(ClueGaudiAlgorithmWrapperCUDA PUBLIC ${CLUEST_TARGET})
 
   set_target_properties(ClueGaudiAlgorithmWrapperCUDA PROPERTIES
     CUDA_STANDARD 20

@@ -22,15 +22,16 @@
 #include "Gaudi/Property.h"
 #include "GaudiKernel/ITHistSvc.h"
 #include "k4FWCore/Consumer.h"
+#include "k4Interface/IGeoSvc.h"
 
 #include "CLUECalorimeterHit.h"
 #include <edm4hep/CaloHitSimCaloHitLinkCollection.h>
 #include <edm4hep/CalorimeterHitCollection.h>
 #include <edm4hep/ClusterCollection.h>
-#include <edm4hep/ClusterMCParticleLinkCollection.h>
 #include <edm4hep/Constants.h>
 #include <edm4hep/EventHeaderCollection.h>
 #include <edm4hep/MCParticleCollection.h>
+#include "DDSegmentation/BitFieldCoder.h"
 
 #include "TH1F.h"
 #include "TTree.h"
@@ -38,15 +39,13 @@
 using ClueHitColl = clue::CLUECalorimeterHitCollection;
 using ClusterColl = edm4hep::ClusterCollection;
 using MCPartColl = edm4hep::MCParticleCollection;
-using ClusterMCLinkColl = edm4hep::ClusterMCParticleLinkCollection;
-
 struct CLUENtuplizer final
     : k4FWCore::Consumer<void(const ClusterColl& cluster_coll, const edm4hep::EventHeaderCollection& ev_handle,
-                              const MCPartColl& mcp_handle, const ClusterMCLinkColl& clustersLink_handle)> {
+                              const MCPartColl& mcp_handle)> {
   CLUENtuplizer(const std::string& name, ISvcLocator* svcLoc)
       : Consumer(name, svcLoc,
                  {KeyValue("InputClusters", "CLUEClusters"), KeyValue("EventHeader", "EventHeader"),
-                  KeyValue("MCParticles", "MCParticles"), KeyValue("ClusterLinks", "ClusterMCTruthLink")}) {}
+                  KeyValue("MCParticles", "MCParticles")}) {}
 
   /// Initialize.
   StatusCode initialize() override;
@@ -57,12 +56,21 @@ struct CLUENtuplizer final
   /// Finalize.
   StatusCode finalize() override;
 
-  void operator()(const ClusterColl& cluster_coll, const edm4hep::EventHeaderCollection& evs, const MCPartColl& mcps,
-                  const ClusterMCLinkColl& linksClus) const override;
+  void operator()(const ClusterColl& cluster_coll, const edm4hep::EventHeaderCollection& evs,
+                  const MCPartColl& mcps) const override;
 
 private:
   Gaudi::Property<std::string> m_CLUECaloHitCollName{this, "CLUEHitCollName", "CLUECalorimeterHitCollection",
                                                      "Name of the collection of CLUE calorimeter hits"};
+  Gaudi::Property<std::string> m_clusterLinksName{this, "ClusterLinks", "",
+                                                "Ignored compatibility property; cluster-MC links are optional"};
+  Gaudi::Property<std::string> m_readoutName{this, "ReadOutName", "GrainitaEcalBarrelRO",
+                                             "DD4hep readout used to decode cluster hit cell IDs"};
+  Gaudi::Property<std::string> m_layerFieldName{this, "LayerFieldName", "rho",
+                                                "DD4hep cell ID field stored as the cluster hit layer"};
+  SmartIF<IGeoSvc> m_geoSvc;
+  const dd4hep::DDSegmentation::BitFieldCoder* m_decoder{nullptr};
+  int m_layerFieldIndex{-1};
   SmartIF<ITHistSvc> m_ths; ///< THistogram service
 
   mutable TTree* t_hits{nullptr};

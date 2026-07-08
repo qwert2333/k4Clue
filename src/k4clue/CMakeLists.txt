@@ -29,12 +29,32 @@ set(SOURCES
   ${PROJECT_SOURCE_DIR}/src/CLUENtuplizer.cpp
 )
 
+set(LOCAL_DETECTOR_SEGMENTATIONS_PLUGIN
+  ${PROJECT_SOURCE_DIR}/../DD4hep_Grainita/install/lib64/libdetectorSegmentationsPlugin.so
+)
+
+if(EXISTS ${LOCAL_DETECTOR_SEGMENTATIONS_PLUGIN})
+  set(DETECTOR_SEGMENTATIONS_PLUGIN ${LOCAL_DETECTOR_SEGMENTATIONS_PLUGIN})
+else()
+  find_library(DETECTOR_SEGMENTATIONS_PLUGIN
+    NAMES detectorSegmentationsPlugin
+    HINTS ${CMAKE_PREFIX_PATH}
+    PATH_SUFFIXES lib lib64
+  )
+endif()
+
+if(NOT DETECTOR_SEGMENTATIONS_PLUGIN)
+  message(FATAL_ERROR "Could not find libdetectorSegmentationsPlugin. Source DD4hep_Grainita/setup.sh or set CMAKE_PREFIX_PATH/LD_LIBRARY_PATH to DD4hep_Grainita/install.")
+endif()
+
 gaudi_add_module(ClueGaudiAlgorithmWrapper
   SOURCES ${SOURCES}
   LINK Gaudi::GaudiKernel
   k4FWCore::k4FWCore
+  k4FWCore::k4Interface
   DD4hep::DDCore
   EDM4HEP::edm4hep
+  ${DETECTOR_SEGMENTATIONS_PLUGIN}
   alpaka
 )
 
@@ -42,7 +62,7 @@ target_include_directories(ClueGaudiAlgorithmWrapper PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
 )
 
-target_link_libraries(ClueGaudiAlgorithmWrapper PUBLIC clue::CLUEstering)
+target_link_libraries(ClueGaudiAlgorithmWrapper PUBLIC ${CLUEST_TARGET})
 
 target_compile_options(ClueGaudiAlgorithmWrapper PUBLIC
   -DALPAKA_ACC_CPU_B_SEQ_T_SEQ_ENABLED

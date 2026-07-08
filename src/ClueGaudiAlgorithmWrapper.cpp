@@ -25,6 +25,8 @@
 
 #include <k4FWCore/MetadataUtils.h>
 
+#include <limits>
+
 using namespace dd4hep;
 using namespace DDSegmentation;
 
@@ -191,6 +193,8 @@ ClueGaudiAlgorithmWrapper<nDim>::fillCLUEPoints(const std::vector<clue::CLUECalo
       floatBuffer[nPoints + i] = phi;           // Fill phi coordinates
       if constexpr (nDim >= 3)
         floatBuffer[nPoints * 2 + i] = clue_hits[i].getPosition().z; // Fill z coordinates
+        // floatBuffer[nPoints * 2 + i] = clue_hits[i].getR(); // Replace with Rho in polar coordinates
+
       floatBuffer[nPoints * nDim + i] = clue_hits[i].getEnergy();    // Fill weights
     }
   } // if Cartesian or Polar (else should not happen due to checks in initialize())
@@ -207,6 +211,7 @@ clue::AssociationMapHost ClueGaudiAlgorithmWrapper<nDim>::runAlgo(std::vector<cl
   std::vector<float> floatBuffer(nPoints * (nDim + 1));
   std::vector<int> intBuffer(nPoints * 2);
   auto cluePoints = fillCLUEPoints(clue_hits, floatBuffer.data(), intBuffer.data());
+  clue::PointsDevice<nDim> clueDevicePoints(*m_queue, cluePoints.size());
 
   // Run CLUE
   debug() << "Running CLUEAlgo on device " << alpaka::getName(alpaka::getDev(*m_queue)) << " in " << (uint16_t)nDim
@@ -217,15 +222,15 @@ clue::AssociationMapHost ClueGaudiAlgorithmWrapper<nDim>::runAlgo(std::vector<cl
   if (m_coordinate == Coordinate::Cartesian) {
     if constexpr (nDim == 4) {
       auto metric = clue::metrics::WeightedEuclidean<nDim>(1.f, 1.f, 1.f, C_MM_NS_SQUARED);
-      m_clueAlgo->make_clusters(*m_queue, cluePoints, metric);
+      m_clueAlgo->make_clusters(*m_queue, cluePoints, clueDevicePoints, metric);
     } else {
-      m_clueAlgo->make_clusters(*m_queue, cluePoints);
+      m_clueAlgo->make_clusters(*m_queue, cluePoints, clueDevicePoints);
     }
   } else if (m_coordinate == Coordinate::Polar) {
     std::array<float, nDim> periods{}; // zero-initialize all to non-periodic
     periods[1] = 2.0f * M_PI;          // set phi coordinate as periodic
     clue::PeriodicEuclideanMetric<nDim> metric(periods);
-    m_clueAlgo->make_clusters(*m_queue, cluePoints, metric);
+    m_clueAlgo->make_clusters(*m_queue, cluePoints, clueDevicePoints, metric);
   } // if Cartesian or Polar (else should not happen due to checks in initialize())
 
   auto finish = std::chrono::high_resolution_clock::now();
@@ -236,8 +241,43 @@ clue::AssociationMapHost ClueGaudiAlgorithmWrapper<nDim>::runAlgo(std::vector<cl
 
   debug() << "Finished running CLUE algorithm" << endmsg;
 
+  std::vector<float> rhoValues(nPoints);
+  std::vector<int> nearestHigherValues(nPoints);
+  std::vector<int> seedValues(nPoints);
+  alpaka::memcpy(*m_queue, clue::make_host_view(rhoValues.data(), nPoints),
+                 clue::make_device_view(alpaka::getDev(*m_queue), clueDevicePoints.view().m_rho, nPoints));
+  alpaka::memcpy(*m_queue, clue::make_host_view(nearestHigherValues.data(), nPoints),
+                 clue::make_device_view(alpaka::getDev(*m_queue), clueDevicePoints.view().m_nearest_higher, nPoints));
+  alpaka::memcpy(*m_queue, clue::make_host_view(seedValues.data(), nPoints),
+                 clue::make_device_view(alpaka::getDev(*m_queue), clueDevicePoints.view().m_is_seed, nPoints));
+  alpaka::wait(*m_queue);
+
+  auto distanceToNearestHigher = [&](int32_t i) {
+    const auto nh = nearestHigherValues[i];
+    if (nh < 0) {
+      return std::numeric_limits<float>::max();
+    }
+
+    float distanceSquared = 0.f;
+    for (uint8_t dim = 0; dim < nDim; ++dim) {
+      float diff = cluePoints.coords(dim)[i] - cluePoints.coords(dim)[nh];
+      if (m_coordinate == Coordinate::Polar && dim == 1) {
+        diff = std::abs(diff);
+        diff = std::min(diff, 2.0f * float(M_PI) - diff);
+      }
+      if constexpr (nDim == 4) {
+        distanceSquared += (dim == 3) ? C_MM_NS_SQUARED * diff * diff : diff * diff;
+      } else {
+        distanceSquared += diff * diff;
+      }
+    }
+    return std::sqrt(distanceSquared);
+  };
+
   // Including CLUE info in cluePoints
   for (int32_t i = 0; i < cluePoints.size(); i++) {
+    clue_hits[i].setRho(rhoValues[i]);
+    clue_hits[i].setDelta(distanceToNearestHigher(i));
     // offset is 0 for the barrel and is the number of clusters in the barrel for the endcap
     clue_hits[i].setClusterIndex(cluePoints.clusterIndexes()[i] + offset);
     verbose() << "CLUE Point #" << i << " : (x,y,z) = (" << clue_hits[i].getPosition().x << ","
@@ -245,6 +285,9 @@ clue::AssociationMapHost ClueGaudiAlgorithmWrapper<nDim>::runAlgo(std::vector<cl
     if (cluePoints.clusterIndexes()[i] == -1) {
       verbose() << " is outlier" << endmsg;
       clue_hits[i].setStatus(clue::CLUECalorimeterHit::Status::outlier);
+    } else if (seedValues[i] != 0) {
+      verbose() << " is seed of cluster #" << cluePoints.clusterIndexes()[i] << endmsg;
+      clue_hits[i].setStatus(clue::CLUECalorimeterHit::Status::seed);
     } else {
       verbose() << " is follower of cluster #" << cluePoints.clusterIndexes()[i] << endmsg;
       clue_hits[i].setStatus(clue::CLUECalorimeterHit::Status::follower);
@@ -287,6 +330,13 @@ void ClueGaudiAlgorithmWrapper<nDim>::fillFinalClusters(std::vector<clue::CLUECa
     cluster.setEnergyError(std::sqrt(sumEnergyErrSquared));
 
     calculatePosition(&cluster);
+
+    info() << "Final cluster #" << cl
+        << " -> hits=" << cluster.hits_size()
+        << " energy=" << cluster.getEnergy()
+        << " position=(" << cluster.getPosition().x << "," << cluster.getPosition().y << "," << cluster.getPosition().z << ")"
+        << " type=" << cluster.getType()
+        << endmsg;
 
     cluster.setType(clue_hits[maxEnergyIndex].getType());
   } // for clusterMap (each cluster)
@@ -358,7 +408,11 @@ void ClueGaudiAlgorithmWrapper<nDim>::calculatePosition(edm4hep::MutableCluster*
 
   for (size_t i = 0; i < cluster->hits_size(); i++) {
     float rhEnergy = cluster->getHits(i).getEnergy();
-    float Wi = std::max(thresholdW0_ - std::log(rhEnergy / total_weight), 0.f);
+    float Wi = std::max(thresholdW0_ + std::log(rhEnergy / total_weight), 0.f);
+
+    // std::cout << "Hit #" << i << " energy: " << rhEnergy << ", total_weight: " << total_weight
+    //           << ", Wi: " << Wi << std::endl;
+
     x_log += cluster->getHits(i).getPosition().x * Wi;
     y_log += cluster->getHits(i).getPosition().y * Wi;
     z_log += cluster->getHits(i).getPosition().z * Wi;

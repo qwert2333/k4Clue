@@ -46,7 +46,7 @@ if(CMAKE_HIP_COMPILER)
     $<$<COMPILE_LANGUAGE:HIP>:${hip_INCLUDE_DIRS}>
   )
 
-  target_link_libraries(ClueGaudiAlgorithmWrapperHIP PUBLIC clue::CLUEstering)
+  target_link_libraries(ClueGaudiAlgorithmWrapperHIP PUBLIC ${CLUEST_TARGET})
 
   set_source_files_properties(${SOURCES_GPU} PROPERTIES LANGUAGE HIP)
 

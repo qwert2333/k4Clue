@@ -17,15 +17,21 @@
  * limitations under the License.
  */
 #include "CLUENtuplizer.h"
-#include "k4FWCore/MetadataUtils.h"
 
-// podio specific includes
-#include "DDSegmentation/BitFieldCoder.h"
+#include "DD4hep/Detector.h"
+#include "GaudiKernel/Service.h"
+#include <exception>
 
 using namespace dd4hep;
 using namespace DDSegmentation;
 
 DECLARE_COMPONENT(CLUENtuplizer)
+
+struct DetectorSegmentationsLoader final : Service {
+  using Service::Service;
+};
+
+DECLARE_COMPONENT(DetectorSegmentationsLoader)
 
 StatusCode CLUENtuplizer::initialize() {
   const std::string ClusterCollectionName = inputLocations("InputClusters")[0];
@@ -36,6 +42,37 @@ StatusCode CLUENtuplizer::initialize() {
   m_ths = service("THistSvc", true);
   if (!m_ths) {
     error() << "Couldn't get THistSvc" << endmsg;
+    return StatusCode::FAILURE;
+  }
+
+  m_geoSvc = service("GeoSvc");
+  if (!m_geoSvc) {
+    error() << "Unable to locate GeoSvc. Make sure GeoSvc is configured before CLUENtuplizer." << endmsg;
+    return StatusCode::FAILURE;
+  }
+  if (m_geoSvc->getDetector()->readouts().find(m_readoutName.value()) ==
+      m_geoSvc->getDetector()->readouts().end()) {
+    error() << "Readout " << m_readoutName.value() << " does not exist" << endmsg;
+    return StatusCode::FAILURE;
+  }
+
+  const auto segmentation = m_geoSvc->getDetector()->readout(m_readoutName.value()).segmentation().segmentation();
+  if (!segmentation) {
+    error() << "Readout " << m_readoutName.value() << " does not have a segmentation" << endmsg;
+    return StatusCode::FAILURE;
+  }
+
+  m_decoder = segmentation->decoder();
+  if (!m_decoder) {
+    error() << "Readout " << m_readoutName.value() << " does not have a decoder" << endmsg;
+    return StatusCode::FAILURE;
+  }
+
+  try {
+    m_layerFieldIndex = m_decoder->index(m_layerFieldName.value());
+  } catch (const std::exception& e) {
+    error() << "Readout " << m_readoutName.value() << " does not contain field " << m_layerFieldName.value()
+            << ": " << e.what() << endmsg;
     return StatusCode::FAILURE;
   }
 
@@ -76,7 +113,7 @@ StatusCode CLUENtuplizer::initialize() {
 }
 
 void CLUENtuplizer::operator()(const ClusterColl& cluster_coll, const edm4hep::EventHeaderCollection& evs,
-                               const MCPartColl& mcps, const ClusterMCLinkColl& linksClus) const {
+                               const MCPartColl& mcps) const {
   const std::string ClusterCollectionName = inputLocations("InputClusters")[0];
   evNum = evs[0].getEventNumber();
   info() << "Event number = " << evNum << endmsg;
@@ -97,75 +134,31 @@ void CLUENtuplizer::operator()(const ClusterColl& cluster_coll, const edm4hep::E
   } else {
     throw std::runtime_error("CLUE hits collection not available");
   }
-
-  // Get collection metadata cellID which is valid for both EB, EE and Clusters
-  const std::string cellIDstr =
-      k4FWCore::getParameter<std::string>(
-          podio::collMetadataParamName("ECalBarrelCollection", edm4hep::labels::CellIDEncoding), this)
-          .value_or("");
-  const BitFieldCoder bf(cellIDstr);
+ 
   cleanTrees();
 
-  // use the already built cluster to MC particle associators
-  std::multimap<uint32_t, std::pair<uint32_t, float>> simToRecoLink;
-  std::multimap<uint32_t, std::pair<uint32_t, float>> recoToSimLink;
-  for (const auto& link : linksClus) {
-    const auto recIdx = link.getFrom().getObjectID().index;
-    const auto simIdx = link.getTo().getObjectID().index;
-    const auto weight = link.getWeight();
-    simToRecoLink.emplace(simIdx, std::make_pair(recIdx, weight));
-    recoToSimLink.emplace(recIdx, std::make_pair(simIdx, weight));
-  }
-
-  std::vector<int> simIdMapping(mcps.size(), -1);
-  int id = 0;
-  for (std::size_t simId = 0; simId < mcps.size(); ++simId) {
-    if (simToRecoLink.contains(simId)) {
-      simIdMapping[simId] = id;
-      ++id;
-      const auto& mcp = mcps[simId];
-      m_sim_event.push_back(evNum);
-      m_sim_pdg.push_back(mcp.getPDG());
-      m_sim_charge.push_back(mcp.getCharge());
-      m_sim_vtx_x.push_back(mcp.getVertex().x);
-      m_sim_vtx_y.push_back(mcp.getVertex().y);
-      m_sim_vtx_z.push_back(mcp.getVertex().z);
-      m_sim_momentum_x.push_back(mcp.getMomentum().x);
-      m_sim_momentum_y.push_back(mcp.getMomentum().y);
-      m_sim_momentum_z.push_back(mcp.getMomentum().z);
-      m_sim_time.push_back(mcp.getTime());
-      m_sim_energy.push_back(mcp.getEnergy());
-      m_sim_primary.push_back(mcp.getGeneratorStatus() == 1);
-      std::vector<int> ids;
-      std::vector<float> shEn;
-      const auto size = simToRecoLink.count(simId);
-      ids.reserve(size);
-      shEn.reserve(size);
-      auto range = simToRecoLink.equal_range(simId);
-      std::for_each(range.first, range.second, [&ids, &shEn](const auto& pair) {
-        ids.push_back(pair.second.first);
-        shEn.push_back(pair.second.second);
-      });
-      m_simToReco_index.push_back(ids);
-      m_simToReco_sharedEnergy.push_back(shEn);
-    }
+  // Cluster-MC truth links are optional. Without them, store all MC particles and
+  // keep the association vectors empty so the ntuple schema remains stable.
+  for (const auto& mcp : mcps) {
+    m_sim_event.push_back(evNum);
+    m_sim_pdg.push_back(mcp.getPDG());
+    m_sim_charge.push_back(mcp.getCharge());
+    m_sim_vtx_x.push_back(mcp.getVertex().x);
+    m_sim_vtx_y.push_back(mcp.getVertex().y);
+    m_sim_vtx_z.push_back(mcp.getVertex().z);
+    m_sim_momentum_x.push_back(mcp.getMomentum().x);
+    m_sim_momentum_y.push_back(mcp.getMomentum().y);
+    m_sim_momentum_z.push_back(mcp.getMomentum().z);
+    m_sim_time.push_back(mcp.getTime());
+    m_sim_energy.push_back(mcp.getEnergy());
+    m_sim_primary.push_back(mcp.getGeneratorStatus() == 1);
+    m_simToReco_index.emplace_back();
+    m_simToReco_sharedEnergy.emplace_back();
   }
 
   for (std::size_t recoId = 0; recoId < cluster_coll.size(); ++recoId) {
-    std::vector<int> ids;
-    std::vector<float> shEn;
-    const auto size = recoToSimLink.count(recoId);
-    ids.reserve(size);
-    shEn.reserve(size);
-    auto range = recoToSimLink.equal_range(recoId);
-    std::for_each(range.first, range.second, [&](const auto& pair) {
-      if (simIdMapping[pair.second.first] == -1)
-        throw error() << "No SimToReco but RecoToSim for simparticle " << pair.first << endmsg;
-      ids.push_back(simIdMapping[pair.second.first]);
-      shEn.push_back(pair.second.second);
-    });
-    m_recoToSim_index.push_back(ids);
-    m_recoToSim_sharedEnergy.push_back(shEn);
+    m_recoToSim_index.emplace_back();
+    m_recoToSim_sharedEnergy.emplace_back();
   }
 
   t_MCParticles->Fill();
@@ -191,7 +184,7 @@ void CLUENtuplizer::operator()(const ClusterColl& cluster_coll, const edm4hep::E
     int maxLayer = 0;
     std::vector<float> hits_time;
     for (const auto& hit : cl.getHits()) {
-      ch_layer = bf.get(hit.getCellID(), "layer");
+      ch_layer = m_decoder->get(hit.getCellID(), m_layerFieldIndex);
       maxLayer = std::max(int(ch_layer), maxLayer);
       verbose() << "  ch cellID : " << hit.getCellID() << ", layer : " << ch_layer << ", energy : " << hit.getEnergy()
                 << endmsg;

@@ -44,7 +44,18 @@ find_package(Boost 1.75.0 REQUIRED)
 
 find_package(alpaka REQUIRED)
 
+# Set local CLUEstering for tunning
+set(CLUEstering_DIR
+    "/afs/cern.ch/user/f/faguo/eos/FCCSW/CLUEstering/install/lib/cmake/CLUEstering"
+    CACHE PATH "Path to the local CLUEstering CMake package")
 find_package(CLUEstering REQUIRED)
+if(TARGET CLUEstering::CLUEstering)
+  set(CLUEST_TARGET CLUEstering::CLUEstering)
+elseif(TARGET clue::CLUEstering)
+  set(CLUEST_TARGET clue::CLUEstering)
+else()
+  message(FATAL_ERROR "CLUEstering was found, but no known CMake target is available")
+endif()
 
 # GPU Dependencies
 include(CheckLanguage)
