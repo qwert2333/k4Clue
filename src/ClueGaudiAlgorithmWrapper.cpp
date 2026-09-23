@@ -331,7 +331,7 @@ void ClueGaudiAlgorithmWrapper<nDim>::fillFinalClusters(std::vector<clue::CLUECa
 
     calculatePosition(&cluster);
 
-    info() << "Final cluster #" << cl
+    debug() << "Final cluster #" << cl
         << " -> hits=" << cluster.hits_size()
         << " energy=" << cluster.getEnergy()
         << " position=(" << cluster.getPosition().x << "," << cluster.getPosition().y << "," << cluster.getPosition().z << ")"
@@ -404,7 +404,7 @@ void ClueGaudiAlgorithmWrapper<nDim>::calculatePosition(edm4hep::MutableCluster*
   float y_log = 0.f;
   float z_log = 0.f;
   float error = 0.f;
-  float thresholdW0_ = 2.9f; // Min percentage of energy to contribute to the log-reweight position
+  float thresholdW0_ = 4.5f; // Min percentage of energy to contribute to the log-reweight position
 
   for (size_t i = 0; i < cluster->hits_size(); i++) {
     float rhEnergy = cluster->getHits(i).getEnergy();
